@@ -55,7 +55,7 @@ import (
 //
 //  The structure and algorithm at the heart of this file is derived from
 //  Alan Miller's AS 274 Algorithm and his Fortran90 source code for that publication.
-//  AS 274 in turn builds upon W. Morven Gentleman's AG 75 algorithm.
+//  AS 274 in turn builds upon W. Morven Gentleman's AS 75 algorithm.
 //  http://www.jstor.org/stable/2347147
 //
 //  Additional information and the Fortran90 source is available at
