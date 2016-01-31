@@ -12,7 +12,7 @@ This golang code does basic linear regression, otherwise know as least-squares f
 This particular solution to fitting linear models can handle infinite data,
 and that's the point.
 
-Again: there a tons of model fitting packages, but the point of interest here
+There are lots of model fitting packages that can handle finite data; they handle data that fits in RAM, or fits on disk, or in the cloud. The point of interest here
 is that this online QR decomposition algorithm can handle Zetta-Bytes of observations,
 *actually unlimited* rows of data. It needs space only proportional to
 O(p^2) for p variables. It only ever has to look at each row once. The original
@@ -79,9 +79,9 @@ Additional information and the Fortran90 source is available at
 http://jblevins.org/mirror/amiller and http://jblevins.org/mirror/amiller/lsq.f90
 The web page http://jblevins.org/mirror/amiller/ indicates that Alan Miller's 
 version of the code has been placed in the public domain. Extensive credit is due to
-Dr. Miller for this rigorous and numerically exacting algorithm. As a tribute, we
-name the central struct the MillerLSQ struct. LSQ is short for least
-squares, the method of regression implemented here.
+Dr. Miller for the implementation and Dr. Gentleman for the theory (using Fast Given's rotations and avoiding square root operations during computation of the Cholesky factorization) in this numerically exacting algorithm.
+
+Non-public enhancement: I've written an extension that allows scatter-gather fitting of models in parallel. This drastically reduces the fitting time for many models. Contact me directly if you are interested in licensing the parallelization code.
 
 License: MIT
 
