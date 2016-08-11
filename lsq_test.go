@@ -441,8 +441,12 @@ func TestReorderBetasCovarReporting(t *testing.T) {
 
 	//     Calculate t-values
 	Tstat := make([]float64, nreq)
+	Pvalue := make([]float64, nreq)
+	residualDegreesOfFreedom := float64(df.Nrow - 5) // assume no rows lost to NaN here. so: 4 covariates + the intercept = 5 degrees of freedom lost.
 	for k := 0; k < nreq; k++ {
 		Tstat[k] = beta[k] / sterr[k]
+		//Pvalue[k] = PvalueAssumingNormalDistribution(Tstat[k])
+		Pvalue[k] = 2 * Pt(Tstat[k], residualDegreesOfFreedom) // 2-sided p-value
 	}
 
 	fmt.Printf("Tstat is %v\n", Tstat)
@@ -453,7 +457,7 @@ func TestReorderBetasCovarReporting(t *testing.T) {
 	})
 
 	//     Output regression table, residual sums of squares, and R-squared.
-	rtab := RegressionTableString(nreq, vname, m.Vorder, beta, sterr, Tstat, m.Rss[wycol])
+	rtab := RegressionTableString(nreq, vname, m.Vorder, beta, sterr, Tstat, m.Rss[wycol], Pvalue)
 	//	fmt.Printf("Variable    Regn.coeff.   Std.error  t-value   Res.sum of sq.\n")
 	//	for i := int(0); i < nreq; i++ {
 	//		fmt.Printf("%v  %12.4g  %11.4g  %7.2f  %14.6g\n", vname[m.Vorder[i]], beta[i], sterr[i], Tstat[i], m.Rss[i])
@@ -462,12 +466,12 @@ func TestReorderBetasCovarReporting(t *testing.T) {
 
 	cv.Convey("The regression table obtained should be correct; match previous implementation", t, func() {
 		cv.So(rtab, cv.ShouldEqual,
-			`Variable    Regn.coeff.   Std.error  t-value   Res.sum of sq.
-Constant         377.3        185.5     2.03          588366
-Tax             -34.79        12.97    -2.68          468543
-Income          -66.59        17.22    -3.87          434889
-RoadMls         -2.426        3.389    -0.72          401405
-DLic             13.36        1.923     6.95          189050
+			`Variable    Regn.coeff.   Std.error  t-value   Res.sum of sq.   p-value
+Constant         377.3        185.5     2.03          588366        0.04821
+Tax             -34.79        12.97    -2.68          468543        0.01033
+Income          -66.59        17.22    -3.87          434889      0.0003684
+RoadMls         -2.426        3.389    -0.72          401405          0.478
+DLic             13.36        1.923     6.95          189050      1.521e-08
 `)
 	})
 
@@ -555,20 +559,35 @@ DLic             13.36        1.923     6.95          189050
 
 	for k := 0; k < nreq; k++ {
 		Tstat[k] = beta[k] / sterr[k]
+
+		//
+		// In computing a p-value, we'll assume the normal Gaussian distribution
+		// approximation to the t-distribution is
+		// close enough for our purposes. See further notes
+		// at the PvalueAssumingNormalDistribution() definition.
+		// Hence our computed p-value will be slightly different from what R's computes.
+		// This difference is because R more closely approximates the Student's T-distribution,
+		// and takes great pains in doing so.
+		// Nonetheless, the difference is not typically meaningful.
+		//
+		// Pvalue[k] = PvalueAssumingNormalDistribution(Tstat[k])
+
+		// or exact:
+		Pvalue[k] = 2 * Pt(Tstat[k], float64(df.Nrow-4)) // intercept + 3 variables fit => 4 degrees of freedom lost.
 	}
 
 	//     Output regression table, residual sums of squares, and R-squared.
 
-	rtab2 := RegressionTableString(nreq, vname, m.Vorder, beta, sterr, Tstat, m.Rss[wycol])
+	rtab2 := RegressionTableString(nreq, vname, m.Vorder, beta, sterr, Tstat, m.Rss[wycol], Pvalue)
 	fmt.Printf(rtab2)
 
 	cv.Convey("The second (after Vmove) regression table obtained should be correct; match previous implementation", t, func() {
 		cv.So(rtab2, cv.ShouldEqual,
-			`Variable    Regn.coeff.   Std.error  t-value   Res.sum of sq.
-Constant         307.3        156.8     1.96          588366
-Tax             -29.48        10.58    -2.79          468543
-Income          -68.02        17.01    -4.00          434889
-DLic             13.75        1.837     7.49          191302
+			`Variable    Regn.coeff.   Std.error  t-value   Res.sum of sq.   p-value
+Constant         307.3        156.8     1.96          588366        0.05639
+Tax             -29.48        10.58    -2.79          468543       0.007848
+Income          -68.02        17.01    -4.00          434889      0.0002397
+DLic             13.75        1.837     7.49          191302      2.239e-09
 `)
 	})
 

@@ -1570,13 +1570,13 @@ func PrintSliceDiff(a, b []float64) {
 
 }
 
-func RegressionTableString(nreq int, vname []string, Vorder []int, beta []float64, sterr []float64, Tstat []float64, Rss []float64) string {
+func RegressionTableString(nreq int, vname []string, Vorder []int, beta []float64, sterr []float64, Tstat []float64, Rss []float64, Pvalue []float64) string {
 
 	s := ""
 
-	s += fmt.Sprintf("Variable    Regn.coeff.   Std.error  t-value   Res.sum of sq.\n")
+	s += fmt.Sprintf("Variable    Regn.coeff.   Std.error  t-value   Res.sum of sq.   p-value\n")
 	for i := int(0); i < nreq; i++ {
-		s += fmt.Sprintf("%v  %12.4g  %11.4g  %7.2f  %14.6g\n", vname[Vorder[i]], beta[i], sterr[i], Tstat[i], Rss[i])
+		s += fmt.Sprintf("%v  %12.4g  %11.4g  %7.2f  %14.6g   %12.4g\n", vname[Vorder[i]], beta[i], sterr[i], Tstat[i], Rss[i], Pvalue[i])
 	}
 
 	return s
