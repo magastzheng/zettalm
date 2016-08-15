@@ -1,8 +1,8 @@
 package lsq
 
 import (
-	"github.com/glycerine/zettalm/gostat"
-	"github.com/glycerine/zettalm/gostat/fn"
+	"github.com/glycerine/gostat"
+	"github.com/glycerine/gostat/fn"
 	"math"
 )
 
