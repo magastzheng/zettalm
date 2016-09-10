@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	cv "github.com/smartystreets/goconvey/convey"
+	cv "github.com/glycerine/goconvey/convey"
 )
 
 // simple validation of stddev.go

@@ -1,11 +1,12 @@
 package lsq
 
-// copyright (c) 2014 by Jason E. Aten
+// copyright (c) 2016 by Jason E. Aten
 
 import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 )
 
@@ -95,11 +96,14 @@ import (
 //            singularities.
 //  Rss_set = a logical variable indicating whether residual sums of squares
 //            are available and usable.
-//  D       = array of row multipliers for the Cholesky factorization.
+//  D       = array of row multipliers (not column, but *row* of R multiplers)
+//            for the Cholesky factorization. So decodedR_ij = sqrt(D[i])*R[i,j].
+//
 //            The factorization is X = Q * sqrt(D) * R where Q is an ortho-
 //            normal matrix which is NOT stored, D is a diagonal matrix
 //            whose diagonal elements are stored in array d, and R is an
-//            upper-triangular matrix with 1's as its diagonal elements.
+//            upper-triangular matrix with (implicit) 1's as its diagonal elements.
+//
 //  Rhs     = vector of RHS projections (after scaling by sqrt(D)).
 //            Thus Q'y = sqrt(D) * Rhs
 //
@@ -116,6 +120,8 @@ import (
 //            y-variable.
 //            By changing the order of variables, the residual sums of
 //            squares can be found for all possible subsets of the variables.
+//
+//            Rss is computed by SS(), and is derived therein from Sserr, Rhs, and D.
 //
 //            The residual sum of squares with NO variables in the model,
 //            that is the total sum of squares of the first column of y-values, can be
@@ -146,10 +152,18 @@ type MillerLSQ struct {
 
 	Nobs           int64   // number of observations included
 	AccumWeightSum float64 // accumulate negative weights too, to track downdating
-	Ncol           int
-	R_dim          int
-	Nxvar          int // not counting Constant (intercept) coefficient. Nxvar = Ncol -1.
-	Nyvar          int // number of y-target variables
+	Nxvar          int     // not counting Constant (intercept) coefficient. Nxvar = Ncol -1.
+	Nyvar          int     // number of y-target variables
+
+	// the main Upper-triangular matrix
+	UpperTriMatrix
+
+	//   UpperTriMatrix provides:
+	// Ncol    int       // Ncol = Nxvar +1. Includes the intercept.
+	// R       []float64 // row-major, upper triangular without the diagonal (implicit 1's)
+	// D       []float64 // the diagonal
+	// Row_ptr []int
+	// R_dim   int // len(R)
 
 	// NaN handling
 	NanApproach         NanHandling // NAN_TO_ZERO or NAN_OMIT_ROW implemented so far.
@@ -170,12 +184,8 @@ type MillerLSQ struct {
 	Sserr  []float64
 	Toly   float64
 
-	Vorder  []int
-	Row_ptr []int
+	Vorder []int
 
-	R []float64 // row-major, upper triangular without the diagonal (implicit 1's)
-
-	D   []float64   // the diagonal
 	Rhs [][]float64 // related to the beta, a list of column vectors, each vector a Rhs for a different y-target.
 	Tol []float64
 	Rss [][]float64 // one for each y
@@ -261,6 +271,7 @@ func NewMillerLSQ(nxvar int, nyvar int) *MillerLSQ {
 	m.Toly = 0.0
 
 	m.Vorder = make([]int, m.Ncol)
+	// in upper.go now???
 	m.Row_ptr = make([]int, m.Ncol)
 
 	m.R = make([]float64, m.R_dim)
@@ -299,7 +310,64 @@ func NewMillerLSQ(nxvar int, nyvar int) *MillerLSQ {
 	m.Curyrow = make([]float64, m.Nyvar)
 
 	return m
-} // end startup
+} // end ctor
+
+func clearSlice(slice []float64) {
+	for i := range slice {
+		slice[i] = 0
+	}
+}
+
+func clearBoolSlice(slice []bool) {
+	for i := range slice {
+		slice[i] = false
+	}
+}
+
+// Reset(): zero everything out, keeping present size. Assumes NewMillerLSQ() has already been called.
+// Avoids re-allocation.
+func (m *MillerLSQ) Reset() {
+
+	m.Nobs = 0
+	m.AccumWeightSum = 0
+
+	m.CountNaNRowsSkipped = 0
+	m.RowsSeen = 0
+
+	m.XStats.ZeroTracker(m.Nxvar)
+	m.YStats.ZeroTracker(m.Nyvar)
+
+	clearSlice(m.Xmean)
+	clearSlice(m.Xsd)
+	clearSlice(m.Ymean)
+	clearSlice(m.Ysd)
+
+	m.Initialized = true
+	m.Tol_set = false
+	clearBoolSlice(m.Rss_set)
+
+	m.Vsmall = 1e-12
+	clearSlice(m.Sserr)
+	m.Toly = 0.0
+
+	for i := 1; i <= m.Ncol; i++ {
+		m.Vorder[i-Adj] = i - 1
+	}
+
+	clearSlice(m.R)
+
+	clearSlice(m.D)
+	for i := range m.Rhs {
+		clearSlice(m.Rhs[i])
+	}
+	clearSlice(m.Tol)
+	for i := range m.Rss {
+		clearSlice(m.Rss[i])
+	}
+
+	clearSlice(m.Curxrow)
+	clearSlice(m.Curyrow)
+}
 
 func StdFormat6dec(x float64) string {
 	return fmt.Sprintf(" %.6f", x)
@@ -448,14 +516,18 @@ func StringSliceEqual(a, b []string) bool {
 //
 //   consider: http://en.wikipedia.org/wiki/Givens_rotation #Stability section, at some point.
 //
-//     ALGORITHM AS75.1  APPL. STATIST. (1974) VOL.23, NO. 3
+//     code: ALGORITHM AS75.1  APPL. STATIST. (1974) VOL.23, NO. 3
+//
+//     To understand the algorithm, this is the critical theory paper:
+//             W. Morven Gentleman, "Least Squares Computations by
+//             Givens Transformations Without Square Roots". J. Inst.
+//             Maths Applics (1973) 12, 329-336.
 //
 //     Calling this routine updates D, R, RHS and SSERR by the
 //     inclusion of xrow, yelem = each of yrow member in turn, with the specified weight.
 //
 //   iff row was ommitted due to nanapproach == NAN_OMIT_ROW, we return false
 func (m *MillerLSQ) Includ(weight float64, xrow []float64, yrow []float64, nanapproach NanHandling) (rowIncluded bool) {
-
 	m.RowsSeen++
 
 	rowIncluded = true //default
@@ -482,13 +554,21 @@ func (m *MillerLSQ) Includ(weight float64, xrow []float64, yrow []float64, nanap
 		panic(fmt.Sprintf("len(yrow) == %v did not match m.Nyvar == %v", len(yrow), m.Nyvar))
 	}
 
-	if len(xrow) != m.Nxvar {
-		panic(fmt.Sprintf("len(xrow) == %v did not match m.Nxvar == %v", len(xrow), m.Nxvar))
+	// assume that input one longer than Nxvar means we are getting the intercept too.
+	// Merge() uses this.
+	if len(xrow) == m.Nxvar+1 {
+		copy(m.Curxrow, xrow)
+		xrow = xrow[1:]
+	} else {
+		if len(xrow) != m.Nxvar {
+			panic(fmt.Sprintf("len(xrow) == %v did not match m.Nxvar == %v", len(xrow), m.Nxvar))
+		}
+		m.Curxrow[0] = 1.0
+		copy(m.Curxrow[1:], xrow) // Curxrow is 1 longer than xrow
 	}
-
-	m.Curxrow[0] = 1.0
-	copy(m.Curxrow[1:], xrow) // Curxrow is 1 longer than xrow
 	copy(m.Curyrow, yrow)
+
+	//fmt.Printf("        in Include, Curxrow = %v\n", m.Curxrow)
 
 	var i, k, nextr int
 	var w, y, xi, di, wxi, dpi, cbar, sbar, xk float64
@@ -539,10 +619,11 @@ func (m *MillerLSQ) Includ(weight float64, xrow []float64, yrow []float64, nanap
 		if math.Abs(xi) < m.Vsmall {
 			nextr = nextr + m.Ncol - i // okay, no Adj needed.
 		} else {
+			// description is on pp331-332 of Gentleman 1973.
 			di = m.D[i-Adj]
 			wxi = w * xi
 			dpi = di + wxi*xi
-
+			//fmt.Printf("At i == %d, adding to D[%d]: %v, where xi=%v and w=%v\n", i, i, wxi*xi, xi, w)
 			if math.IsNaN(dpi) {
 				msg := "detected IsNaN(dpi) in Includ()"
 				panic(msg)
@@ -556,8 +637,22 @@ func (m *MillerLSQ) Includ(weight float64, xrow []float64, yrow []float64, nanap
 				cbar = di / dpi
 				sbar = wxi / dpi
 			}
-			w = cbar * w
+			//wPreUpdate := w
+			w = cbar * w // deceptively simple but very important
+			//fmt.Printf("%v -> %v.  after update w = cbar * w, we have w = %v where cbar = %v\n", wPreUpdate, w, w, cbar)
 			m.D[i-Adj] = dpi
+
+			// apply the left-multiplication by the fast Givens transform matrix
+			// that is [  cbar, sbar] is our Givens(i,k) matrix in compressed-to-2x2-form.
+			//         [ -sbar, cbar]
+			// and nextr indexes into Rbar_k on page 322 of Gentleman 1973.
+			// Note that Rbar_i is implicity 1 because the R value is stored in D.
+			//
+			// The result is that the Curxrow is reduced to all zeros and discarded,
+			// while the m.R matrix is updated to contain the additional row in its
+			// factorization of X the design matrix. The orthogonal matrix Q, which
+			// would be the product of all the Givens-transform matrices, is
+			// never stored.
 			for k = i + 1; k <= m.Ncol; k++ {
 				xk = m.Curxrow[k-Adj]
 				m.Curxrow[k-Adj] = xk - xi*m.R[nextr]  // no Adj needed for [nextr]
@@ -575,7 +670,7 @@ func (m *MillerLSQ) Includ(weight float64, xrow []float64, yrow []float64, nanap
 
 				m.Curyrow[yi] = y
 			}
-		}
+		} // end else xi is not small
 		//fmt.Printf("during Includ(), pass %d: m.Rhs is %v\n", i, m.Rhs)
 	} // end i over 1..Ncol
 
@@ -780,7 +875,7 @@ func (m *MillerLSQ) SingularCheck(lindep *[]bool, wycol int) int {
 	x := make([]float64, m.Ncol)
 	work := make([]float64, m.Ncol)
 
-	var ifault int = 0
+	var ifault int
 
 	for k := range work {
 		work[k] = math.Sqrt(math.Abs(m.D[k]))
@@ -861,6 +956,9 @@ func (m *MillerLSQ) SS(wycol int) {
 //     Calculate covariance matrix for regression coefficients for the
 //     first nreq variables, from an orthogonal reduction produced from
 //     AS75.1.
+//
+//     *Note* that this is the covariance of the betas, *not* the
+//     covariance of the design matrix X.
 //
 //     Auxiliary routine called: Inv()
 //
@@ -1643,4 +1741,144 @@ func NanToZero(s []float64) bool {
 		}
 	}
 	return foundNaN
+}
+
+func (m *MillerLSQ) R_to_xrows() (xrows [][]float64, yrows [][]float64) {
+	xrows = make([][]float64, m.Ncol)
+	for i := range xrows {
+		xrows[i] = make([]float64, m.Ncol)
+	}
+
+	P := m.Ncol
+	M := m.Ncol - 1
+	k := 0
+	var di float64
+	for i := 0; i < m.Ncol; i++ {
+		di = m.D[i]
+		xrows[i][i] = di
+		if i < M {
+			for j := i + 1; j < P; j++ {
+				xrows[i][j] = di * m.R[k]
+				k++
+			}
+		}
+		fmt.Printf("xrows[%d] = %v\n", i, xrows[i])
+	}
+
+	// yrows will hold transpose of Rhs
+	yrows = make([][]float64, m.Ncol)
+	for i := range yrows {
+		yrows[i] = make([]float64, m.Nyvar)
+	}
+
+	for i := 0; i < m.Ncol; i++ {
+		for j := 0; j < m.Nyvar; j++ {
+			yrows[i][j] = m.Rhs[j][i]
+		}
+		fmt.Printf("yrows[%d] = %v\n", i, yrows[i])
+	}
+
+	return xrows, yrows
+}
+
+func (m *MillerLSQ) StringRDaigonalSqrtD() string {
+
+	dat := m.R
+	ncol := m.Ncol
+	formatFunc := StdFormat6dec
+	linesep := "\n"
+
+	var i, j, pos int
+	s := "["
+	pos = 0
+	for i = 1; i <= ncol; i++ {
+
+		for j = 1; j <= ncol; j++ {
+			if j < i {
+				s += formatFunc(0.0)
+			} else if j == i {
+				s += formatFunc(math.Sqrt(m.D[i-Adj]))
+			} else {
+				// the whole column of m.R is scaled by 1/sqrt(D[column])
+				// implicitly, so we must scale back up when we unpack.
+				// This will let us match against R's QR-decomposition,
+				// qr.R(qr(x1),y=y1), for example, or the chol(t(x1)%*%x1).
+				s += formatFunc(dat[pos] * math.Sqrt(m.D[i-Adj]))
+				pos++
+			}
+		}
+
+		if i < ncol {
+			s += " " + linesep
+		} else {
+			s += "]"
+		}
+	}
+
+	return s
+
+}
+
+func deepcheck(a, b interface{}, name string) {
+	if !reflect.DeepEqual(a, b) {
+		msg := fmt.Sprintf("'%s' differed: '%#v' vs '%#v'", name, a, b)
+		panic(msg)
+		fmt.Printf("\n%s\n", msg)
+	}
+}
+
+func floatcheck(a, b []float64, name string) {
+	if !EpsSliceEqual(a, b, 1e-7) {
+		var maxdiff float64
+		for i := range a {
+			tmp := math.Abs(a[i] - b[i])
+			if tmp > maxdiff {
+				maxdiff = tmp
+			}
+		}
+		msg := fmt.Sprintf("'%s' differed (as much as %v): '%#v' vs '%#v'", name, maxdiff, a, b)
+		panic(msg)
+		fmt.Printf("\n%s\n", msg)
+	}
+}
+
+// CompareLSQ panics if it finds a difference between a and b. Else returns true.
+func CompareLSQ(a, b *MillerLSQ) bool {
+
+	floatcheck(a.XStats.W, b.XStats.W, "XStats.W")
+	floatcheck(a.XStats.A, b.XStats.A, "XStats.A")
+	floatcheck(a.XStats.Q, b.XStats.Q, "XStats.Q")
+	deepcheck(a.XStats.Nc, b.XStats.Nc, "XStats.Nc")
+
+	floatcheck(a.YStats.W, b.YStats.W, "YStats.W")
+	floatcheck(a.YStats.A, b.YStats.A, "YStats.A")
+	floatcheck(a.YStats.Q, b.YStats.Q, "YStats.Q")
+	deepcheck(a.YStats.Nc, b.YStats.Nc, "YStats.Nc")
+
+	deepcheck(a.Nobs, b.Nobs, "Nobs")
+	deepcheck(a.AccumWeightSum, b.AccumWeightSum, "AccumWeightSum")
+	deepcheck(a.Nxvar, b.Nxvar, "Nxvar")
+	deepcheck(a.Nyvar, b.Nyvar, "Nyvar")
+	floatcheck(a.UpperTriMatrix.R, b.UpperTriMatrix.R, "UpperTriMatrix.R")
+	floatcheck(a.UpperTriMatrix.D, b.UpperTriMatrix.D, "UpperTriMatrix.D")
+
+	deepcheck(a.NanApproach, b.NanApproach, "NanApproach")
+	deepcheck(a.CountNaNRowsSkipped, b.CountNaNRowsSkipped, "CountNaNRowsSkipped")
+	deepcheck(a.RowsSeen, b.RowsSeen, "RowsSeen")
+	deepcheck(a.UseMeanSd, b.UseMeanSd, "UseMeanSd")
+	deepcheck(a.Xmean, b.Xmean, "Xmean")
+	deepcheck(a.Xsd, b.Xsd, "Xsd")
+	deepcheck(a.Ymean, b.Ymean, "Ymean")
+	deepcheck(a.Ysd, b.Ysd, "Ysd")
+	deepcheck(a.Initialized, b.Initialized, "Initialized")
+	floatcheck(a.Sserr, b.Sserr, "Sserr")
+	deepcheck(a.Toly, b.Toly, "Toly")
+	deepcheck(a.Vorder, b.Vorder, "Vorder")
+	for i := range a.Rhs {
+		floatcheck(a.Rhs[i], b.Rhs[i], fmt.Sprintf("Rhs[%d]", i))
+	}
+	deepcheck(a.Rss, b.Rss, "Rss")
+	deepcheck(a.Dim_rinv, b.Dim_rinv, "Dim_rinv")
+
+	return true
 }

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	cv "github.com/smartystreets/goconvey/convey"
+	cv "github.com/glycerine/goconvey/convey"
 )
 
 // simple validation of stddev.go
@@ -263,6 +263,9 @@ func TestBiggerDataSmallerModelG3(t *testing.T) {
 	knownGoodBeta := []float64{701.863273934701, 22.394916792915925, -180.25041095321492, 13.093753729871201, -0.6434176898397235, -0.20503547472106387}
 	cv.Convey("m.Regcf() should compute the correct parameter estimates or betas.", t, func() {
 		cv.So(EpsSliceEqual(beta, knownGoodBeta, 1e-10), cv.ShouldEqual, true)
+		if !EpsSliceEqual(beta, knownGoodBeta, 1e-10) {
+			fmt.Printf("beta = %v\n\n vs knownGoodBeta=%v\n", beta, knownGoodBeta)
+		}
 	})
 
 	m.SS(wycol) // Calculate residual sums of squares

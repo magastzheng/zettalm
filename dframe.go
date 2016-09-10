@@ -20,6 +20,14 @@ type DataFrame struct {
 	Rownames []string
 }
 
+func (df *DataFrame) AddFirstOnesColumn() {
+	df.Colnames = append([]string{"const"}, df.Colnames...)
+	df.Ncol++
+	for i := range df.Rows {
+		df.Rows[i] = append([]float64{1}, df.Rows[i]...)
+	}
+}
+
 func (df *DataFrame) String() string {
 	s := fmt.Sprintf("DataFrame [%d x %d] = \n", df.Nrow, df.Ncol)
 	digits := 3
